@@ -391,23 +391,6 @@ function DevicesPanel({ peers, me, selected, setSelected, onChooseFiles, dragOve
 
   return (
     <>
-      {/* Radar area */}
-      <div className="radar-wrap">
-        <div className="radar-rings">
-          <div className="radar-ring" />
-          <div className="radar-ring" />
-          <div className="radar-ring" />
-          <div className="radar-me">
-            <LaptopIcon size={26} />
-          </div>
-        </div>
-        <div className="radar-status">
-          {peers.length === 0
-            ? "Scanning network…"
-            : `${peers.length} device${peers.length === 1 ? "" : "s"} nearby`}
-        </div>
-      </div>
-
       <div className="device-actions">
         <button className="muted" onClick={onRescan}>
           <RefreshIcon size={13} /> Rescan
@@ -463,6 +446,23 @@ function DevicesPanel({ peers, me, selected, setSelected, onChooseFiles, dragOve
           </button>
         </form>
       )}
+
+      {/* Radar area */}
+      <div className="radar-wrap">
+        <div className="radar-rings">
+          <div className="radar-ring" />
+          <div className="radar-ring" />
+          <div className="radar-ring" />
+          <div className="radar-me">
+            <LaptopIcon size={26} />
+          </div>
+        </div>
+        <div className="radar-status">
+          {peers.length === 0
+            ? "Scanning network…"
+            : `${peers.length} device${peers.length === 1 ? "" : "s"} nearby`}
+        </div>
+      </div>
 
       {/* Device grid */}
       <div className="device-grid">
