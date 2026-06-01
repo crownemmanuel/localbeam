@@ -190,18 +190,18 @@ export default function App() {
 
 function Header({ me, onQr, onHide, onSettings }: { me: MeInfo | null; onQr: () => void; onHide: () => void; onSettings: () => void }) {
   return (
-    <div className="header">
-      <div className="header-avatar">
+    <div className="header" data-tauri-drag-region>
+      <div className="header-avatar" data-tauri-drag-region>
         <LaptopIcon size={17} />
       </div>
-      <div>
-        <div className="header-name">{me?.name ?? "LocalBeam"}</div>
-        <div className="header-sub">
+      <div data-tauri-drag-region style={{ flex: 1, minWidth: 0 }}>
+        <div className="header-name" data-tauri-drag-region>{me?.name ?? "LocalBeam"}</div>
+        <div className="header-sub" data-tauri-drag-region>
           {me?.host ?? "connecting…"} · {me ? (me.allow_mode === "all" ? "Open" : "Contacts only") : ""}
         </div>
       </div>
       <div className="header-actions">
-        <button className="ghost" onClick={onQr} title="Mobile QR"><QrCodeIcon size={16} /></button>
+        <button className="ghost" onClick={onQr} title="Mobile QR"><PhoneIcon size={16} /></button>
         <button className="ghost" onClick={onSettings} title="Settings"><SettingsIcon size={16} /></button>
         <button className="ghost" onClick={onHide} title="Hide"><XIcon size={16} /></button>
       </div>
