@@ -1,0 +1,350 @@
+# Production / early-access releases: uploads assets then POST /api/internal/releases/publish.
+# Does not git-push or upload GitHub Release assets; binaries/manifests publish only to the SmartVerses backend (R2)
+# when SMARTVERSES_RELEASE_PUBLISH_* secrets are set.
+# - Push tag v* → backend channel "main" (stable).
+# - workflow_dispatch → release_channel input: main | early_access (maps to backend ReleaseChannel).
+# publish marks the version current for that channel only (SmartVerses-Backend publishRelease).
+name: Release
+
+on:
+    push:
+        tags:
+            - "v*"
+    workflow_dispatch:
+        inputs:
+            version:
+                description: Version to publish when run manually
+                required: true
+                type: string
+            release_channel:
+                description: Backend release channel
+                required: true
+                default: main
+                type: choice
+                options:
+                    - main
+                    - early_access
+
+permissions:
+    contents: read
+
+jobs:
+    resolve-release-meta:
+        runs-on: ubuntu-latest
+        outputs:
+            version: ${{ steps.release-meta.outputs.version }}
+            release_channel: ${{ steps.release-meta.outputs.release_channel }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Resolve release metadata
+              id: release-meta
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+                    version="${{ github.event.inputs.version }}"
+                    release_channel="${{ github.event.inputs.release_channel }}"
+                  else
+                    version="${GITHUB_REF#refs/tags/v}"
+                    release_channel="main"
+                  fi
+
+                  echo "version=${version}" >> "${GITHUB_OUTPUT}"
+                  echo "release_channel=${release_channel}" >> "${GITHUB_OUTPUT}"
+
+    build-tauri:
+        needs: resolve-release-meta
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - platform: "macos-latest"
+                      args: "--target aarch64-apple-darwin"
+                    - platform: "macos-latest"
+                      args: "--target x86_64-apple-darwin"
+                    - platform: "ubuntu-22.04"
+                      args: ""
+                    - platform: "windows-latest"
+                      args: ""
+
+        runs-on: ${{ matrix.platform }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: lts/*
+
+            - name: Install Rust stable
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+            - name: Cache Rust / Cargo
+              uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: src-tauri
+                  shared-key: release-${{ matrix.platform }}-${{ matrix.args }}
+
+            - name: Install dependencies (Ubuntu only)
+              if: matrix.platform == 'ubuntu-22.04'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev pkg-config
+
+            - name: Install frontend dependencies
+              run: npm install
+
+            - name: Import Apple certificate (macOS only)
+              if: matrix.platform == 'macos-latest'
+              env:
+                  APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+                  APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+                  KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+              run: |
+                  if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_CERTIFICATE_PASSWORD" ] || [ -z "$KEYCHAIN_PASSWORD" ]; then
+                    echo "Missing one or more required macOS signing secrets." >&2
+                    exit 1
+                  fi
+
+                  echo "$APPLE_CERTIFICATE" | base64 -d > certificate.p12 2>/dev/null || echo "$APPLE_CERTIFICATE" | base64 -D > certificate.p12
+                  security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+                  security default-keychain -s build.keychain
+                  security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+                  security set-keychain-settings -t 3600 -u build.keychain
+                  security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+                  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+                  CERT_LINE=$(security find-identity -v -p codesigning build.keychain | grep "Developer ID Application" | head -n 1)
+                  CERT_ID=$(echo "$CERT_LINE" | awk -F\" '{print $2}')
+                  if [ -z "$CERT_ID" ]; then
+                    echo "Developer ID Application identity not found in keychain." >&2
+                    security find-identity -v -p codesigning build.keychain
+                    exit 1
+                  fi
+
+                  echo "APPLE_SIGNING_IDENTITY=$CERT_ID" >> "$GITHUB_ENV"
+                  echo "Using Apple signing identity: $CERT_ID"
+
+            - name: Build the app
+              uses: tauri-apps/tauri-action@v0
+              env:
+                  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+                  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+                  APPLE_CERTIFICATE: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_CERTIFICATE || '' }}
+                  APPLE_CERTIFICATE_PASSWORD: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+                  APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'macos-latest' && env.APPLE_SIGNING_IDENTITY || '' }}
+                  APPLE_ID: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_ID || '' }}
+                  APPLE_PASSWORD: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_PASSWORD || '' }}
+                  APPLE_TEAM_ID: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_TEAM_ID || '' }}
+                  # Enable ARM i8mm (Int8 Matrix Multiply) for whisper-rs/ggml on Apple Silicon (aarch64-apple-darwin)
+                  CFLAGS: ${{ matrix.args == '--target aarch64-apple-darwin' && '-march=armv8.2-a+dotprod+i8mm' || '' }}
+                  CXXFLAGS: ${{ matrix.args == '--target aarch64-apple-darwin' && '-march=armv8.2-a+dotprod+i8mm' || '' }}
+              with:
+                  args: ${{ matrix.args }}
+
+            - name: Upload release files for backend publishing
+              uses: actions/upload-artifact@v4
+              with:
+                  name: release-files-${{ matrix.platform }}-${{ matrix.args || 'default' }}
+                  retention-days: 7
+                  if-no-files-found: warn
+                  path: |
+                    src-tauri/target/**/bundle/**/*.dmg
+                    src-tauri/target/**/bundle/**/*.msi
+                    src-tauri/target/**/bundle/**/*.exe
+                    src-tauri/target/**/bundle/**/*.AppImage
+                    src-tauri/target/**/bundle/**/*.appimage
+                    src-tauri/target/**/bundle/**/*.deb
+                    src-tauri/target/**/bundle/**/*.rpm
+                    src-tauri/target/**/bundle/**/*.app.tar.gz
+                    src-tauri/target/**/*.sig
+
+    publish-release:
+        runs-on: ubuntu-latest
+        needs: [resolve-release-meta, build-tauri]
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Download built release files
+              uses: actions/download-artifact@v4
+              with:
+                  path: release-assets
+
+            - name: Backend publish prerequisites
+              env:
+                  SMARTVERSES_RELEASE_PUBLISH_URL: ${{ secrets.SMARTVERSES_RELEASE_PUBLISH_URL }}
+                  SMARTVERSES_RELEASE_PUBLISH_TOKEN: ${{ secrets.SMARTVERSES_RELEASE_PUBLISH_TOKEN }}
+              run: |
+                  if [ -z "${SMARTVERSES_RELEASE_PUBLISH_URL}" ] || [ -z "${SMARTVERSES_RELEASE_PUBLISH_TOKEN}" ]; then
+                    echo "::warning::SMARTVERSES_RELEASE_PUBLISH_URL / SMARTVERSES_RELEASE_PUBLISH_TOKEN not set — skipping backend (R2) upload."
+                  fi
+
+            # Backend must have R2_* + Supabase env (Cloudflare R2 stores binaries; Postgres stores metadata).
+            # VERSION + RELEASE_CHANNEL come from resolve-release-meta job outputs (tag → main; manual → input).
+            - name: Upload artifacts to SmartVerses backend
+              env:
+                  SMARTVERSES_RELEASE_PUBLISH_URL: ${{ secrets.SMARTVERSES_RELEASE_PUBLISH_URL }}
+                  SMARTVERSES_RELEASE_PUBLISH_TOKEN: ${{ secrets.SMARTVERSES_RELEASE_PUBLISH_TOKEN }}
+                  VERSION: ${{ needs.resolve-release-meta.outputs.version }}
+                  RELEASE_CHANNEL: ${{ needs.resolve-release-meta.outputs.release_channel }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${SMARTVERSES_RELEASE_PUBLISH_URL:-}" ] || [ -z "${SMARTVERSES_RELEASE_PUBLISH_TOKEN:-}" ]; then
+                    echo "Release publish URL/token not configured; skipping backend artifact upload (add repository secrets SMARTVERSES_RELEASE_PUBLISH_URL and SMARTVERSES_RELEASE_PUBLISH_TOKEN under Actions secrets, same as signing secrets)." >&2
+                    exit 0
+                  fi
+
+                  normalize_release_publish_base_url() {
+                    local raw="$1"
+                    raw="$(printf '%s' "$raw" | tr -d '\r\n')"
+                    raw="${raw%/}"
+                    raw="${raw%/api/internal/releases/assets/presign}"
+                    raw="${raw%/api/internal/releases/assets/complete}"
+                    raw="${raw%/api/internal/releases/publish}"
+                    raw="${raw%/api/internal/releases/assets}"
+                    raw="${raw%/api/internal/releases}"
+                    raw="${raw%/api/internal}"
+                    raw="${raw%/api}"
+                    printf '%s' "$raw"
+                  }
+
+                  RELEASE_PUBLISH_BASE_URL="$(normalize_release_publish_base_url "${SMARTVERSES_RELEASE_PUBLISH_URL}")"
+                  echo "Using SmartVerses release publish origin: ${RELEASE_PUBLISH_BASE_URL}"
+
+                  # Presigned PUT → R2 (avoids Vercel 4.5MB body limit on multipart /api/internal/releases/assets).
+                  upload_asset() {
+                    local file_path="$1"
+                    local platform="$2"
+                    local artifact_kind="$3"
+                    local arch="$4"
+                    local base_name ct presign_payload presign_resp upload_url completion_token content_type sha256_hex size_bytes complete_payload
+                    base_name="$(basename "$file_path")"
+                    ct="application/octet-stream"
+                    case "${file_path}" in
+                      *.dmg) ct="application/x-apple-diskimage" ;;
+                      *.msi) ct="application/x-msi" ;;
+                      *.app.tar.gz) ct="application/gzip" ;;
+                    esac
+                    presign_payload="$(jq -nc \
+                      --arg version "${VERSION}" \
+                      --arg channel "${RELEASE_CHANNEL}" \
+                      --arg platform "${platform}" \
+                      --arg artifactKind "${artifact_kind}" \
+                      --arg arch "${arch}" \
+                      --arg fileName "${base_name}" \
+                      --arg contentType "${ct}" \
+                      '{version:$version,channel:$channel,platform:$platform,artifactKind:$artifactKind,arch:$arch,fileName:$fileName,contentType:$contentType}')"
+                    presign_resp="$(curl --fail --show-error --silent \
+                      -X POST "${RELEASE_PUBLISH_BASE_URL}/api/internal/releases/assets/presign" \
+                      -H "content-type: application/json" \
+                      -H "x-smartverses-release-token: ${SMARTVERSES_RELEASE_PUBLISH_TOKEN}" \
+                      -d "${presign_payload}")"
+                    upload_url="$(echo "${presign_resp}" | jq -r '.uploadUrl // empty')"
+                    completion_token="$(echo "${presign_resp}" | jq -r '.completionToken')"
+                    content_type="$(echo "${presign_resp}" | jq -r '.requiredHeaders["Content-Type"] // "application/octet-stream"')"
+                    if [ -n "${upload_url}" ]; then
+                      curl --fail --show-error --silent \
+                        -X PUT "${upload_url}" \
+                        -H "Content-Type: ${content_type}" \
+                        --data-binary "@${file_path}"
+                    fi
+                    sha256_hex="$(sha256sum "${file_path}" | awk '{print $1}')"
+                    size_bytes="$(stat -c%s "${file_path}")"
+                    complete_payload="$(jq -nc \
+                      --arg completionToken "${completion_token}" \
+                      --arg sha256 "${sha256_hex}" \
+                      --argjson sizeBytes "${size_bytes}" \
+                      '{completionToken:$completionToken,sha256:$sha256,sizeBytes:$sizeBytes}')"
+                    curl --fail --show-error --silent \
+                      -X POST "${RELEASE_PUBLISH_BASE_URL}/api/internal/releases/assets/complete" \
+                      -H "content-type: application/json" \
+                      -H "x-smartverses-release-token: ${SMARTVERSES_RELEASE_PUBLISH_TOKEN}" \
+                      -d "${complete_payload}"
+                  }
+
+                  while IFS= read -r file_path; do
+                    case "${file_path}" in
+                      *.dmg)
+                        case "${file_path}" in
+                          *aarch64*|*arm64*) upload_asset "${file_path}" "mac" "dmg" "aarch64" ;;
+                          *x86_64*|*_x64*|*-x64*|*intel*) upload_asset "${file_path}" "mac" "dmg" "x86_64" ;;
+                          *) upload_asset "${file_path}" "mac" "dmg" "unknown" ;;
+                        esac
+                        ;;
+                      *.msi) upload_asset "${file_path}" "windows" "msi" "x86_64" ;;
+                      *.exe) upload_asset "${file_path}" "windows" "exe" "x86_64" ;;
+                      *.AppImage|*.appimage) upload_asset "${file_path}" "linux" "appimage" "x86_64" ;;
+                      *.deb) upload_asset "${file_path}" "linux" "deb" "x86_64" ;;
+                      *.rpm) upload_asset "${file_path}" "linux" "rpm" "x86_64" ;;
+                      *.app.tar.gz)
+                        case "${file_path}" in
+                          *aarch64-apple-darwin*|*aarch64*) upload_asset "${file_path}" "mac" "updater_bundle" "aarch64" ;;
+                          *x86_64-apple-darwin*|*_x64*|*/x64/*|*x86_64*) upload_asset "${file_path}" "mac" "updater_bundle" "x86_64" ;;
+                          *) echo "::warning::Skipping mac updater bundle with unknown arch in path: ${file_path}" >&2 ;;
+                        esac
+                        ;;
+                    esac
+                  done < <(find release-assets -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.appimage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.app.tar.gz' \) | sort)
+
+            - name: Publish latest backend release metadata (sets current for channel)
+              env:
+                  SMARTVERSES_RELEASE_PUBLISH_URL: ${{ secrets.SMARTVERSES_RELEASE_PUBLISH_URL }}
+                  SMARTVERSES_RELEASE_PUBLISH_TOKEN: ${{ secrets.SMARTVERSES_RELEASE_PUBLISH_TOKEN }}
+                  VERSION: ${{ needs.resolve-release-meta.outputs.version }}
+                  RELEASE_CHANNEL: ${{ needs.resolve-release-meta.outputs.release_channel }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${SMARTVERSES_RELEASE_PUBLISH_URL:-}" ] || [ -z "${SMARTVERSES_RELEASE_PUBLISH_TOKEN:-}" ]; then
+                    echo "Release publish URL/token not configured; skipping backend release metadata publish." >&2
+                    exit 0
+                  fi
+
+                  normalize_release_publish_base_url() {
+                    local raw="$1"
+                    raw="$(printf '%s' "$raw" | tr -d '\r\n')"
+                    raw="${raw%/}"
+                    raw="${raw%/api/internal/releases/assets/presign}"
+                    raw="${raw%/api/internal/releases/assets/complete}"
+                    raw="${raw%/api/internal/releases/publish}"
+                    raw="${raw%/api/internal/releases/assets}"
+                    raw="${raw%/api/internal/releases}"
+                    raw="${raw%/api/internal}"
+                    raw="${raw%/api}"
+                    printf '%s' "$raw"
+                  }
+
+                  RELEASE_PUBLISH_BASE_URL="$(normalize_release_publish_base_url "${SMARTVERSES_RELEASE_PUBLISH_URL}")"
+                  echo "Using SmartVerses release publish origin: ${RELEASE_PUBLISH_BASE_URL}"
+                  notes_text="SmartVerses ${VERSION} is now distributed from the SmartVerses backend."
+                  echo "Updater bundle inventory:"
+                  find release-assets -type f \( -name '*.app.tar.gz' -o -name '*.sig' -o -name '*.dmg' \) | sort
+                  export ASSET_DIR="release-assets"
+                  export OUTPUT_PATH="generated-latest.json"
+                  export MANIFEST_NOTES="${notes_text}"
+                  export REQUIRE_MAC_UPDATER_BUNDLES="1"
+                  node ./scripts/build-updater-manifest.mjs
+                  echo "Generated updater manifest:"
+                  cat "${OUTPUT_PATH}"
+                  jq -e '.platforms["darwin-aarch64"] and .platforms["darwin-x86_64"]' "${OUTPUT_PATH}" >/dev/null
+                  export MANIFEST_FILE="${OUTPUT_PATH}"
+
+                  changelog_json="$(python3 -c "import json, pathlib; print(json.dumps(pathlib.Path('PUBLICCHAINLOG.MD').read_text()))")"
+                  notes_json="$(python3 -c "import json, os; print(json.dumps(os.environ['MANIFEST_NOTES']))")"
+                  manifest_json="$(python3 -c "import json, os, pathlib; print(json.dumps(json.loads(pathlib.Path(os.environ['MANIFEST_FILE']).read_text())))")"
+
+                  curl --fail --show-error --silent \
+                    -X POST "${RELEASE_PUBLISH_BASE_URL}/api/internal/releases/publish" \
+                    -H "content-type: application/json" \
+                    -H "x-smartverses-release-token: ${SMARTVERSES_RELEASE_PUBLISH_TOKEN}" \
+                    --data "{
+                      \"channel\":\"${RELEASE_CHANNEL}\",
+                      \"version\":\"${VERSION}\",
+                      \"changelogMarkdown\":${changelog_json},
+                      \"tauriNotes\":${notes_json},
+                      \"manifestJson\":${manifest_json}
+                    }"
+              shell: bash
