@@ -7,6 +7,7 @@ use crate::{
     },
 };
 use anyhow::{Context, Result, anyhow};
+use tauri::Manager;
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -413,6 +414,13 @@ where
             .write()
             .insert(transfer_id.clone(), tx);
         state.emit("incoming-transfer", prompt);
+        // Bring the window forward so the user sees the accept/reject modal.
+        if let Some(app) = state.app.read().clone() {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }
         match timeout(Duration::from_secs(120), rx).await {
             Ok(Ok(v)) => v,
             _ => {

@@ -6,6 +6,7 @@ use crate::{
     },
 };
 use anyhow::Result;
+use tauri::Manager;
 use axum::{
     Json, Router,
     extract::{Multipart, Path as AxPath, Query, State},
@@ -111,6 +112,12 @@ async fn announce(
         .write()
         .insert(transfer_id.clone(), tx);
     s.app.emit("incoming-transfer", prompt);
+    if let Some(app_handle) = s.app.app.read().clone() {
+        if let Some(win) = app_handle.get_webview_window("main") {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    }
 
     let accepted = match timeout(Duration::from_secs(180), rx).await {
         Ok(Ok(v)) => v,
