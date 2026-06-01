@@ -12,10 +12,12 @@ use crate::{
 };
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow,
-    menu::{Menu, MenuItem},
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, Wry,
+    menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+
+struct KeepOpenItem(CheckMenuItem<Wry>);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -153,8 +155,12 @@ pub fn run() {
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_i = MenuItem::with_id(app, "open", "Open LocalBeam", true, None::<&str>)?;
+    let keep_open_i = CheckMenuItem::with_id(app, "keep_open", "Keep Open", true, false, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_i, &quit_i])?;
+    let menu = Menu::with_items(app, &[&open_i, &keep_open_i, &quit_i])?;
+
+    // Store the check item so the menu event handler can read/write its state.
+    app.manage(KeepOpenItem(keep_open_i));
 
     let h = app.clone();
     let tray_icon = match tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png")) {
@@ -176,14 +182,26 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(move |app, ev| match ev.id.as_ref() {
             "open" => {
                 if let Some(w) = app.get_webview_window("main") {
-                    position_bottom_right(&w);
+                    position_bottom_right_once(&w);
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
             }
-            "quit" => {
-                app.exit(0);
+            "keep_open" => {
+                let state = app.state::<Arc<AppState>>();
+                let item = app.state::<KeepOpenItem>();
+                // Native CheckMenuItem toggles its own check state on click;
+                // read the new state and sync auto_hide to the inverse.
+                let is_checked = item.0.is_checked().unwrap_or(false);
+                *state.auto_hide.write() = !is_checked;
+                if is_checked {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
             }
+            "quit" => app.exit(0),
             _ => {}
         })
         .on_tray_icon_event(move |_tray, event| {
@@ -193,11 +211,19 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
+                let state = h.state::<Arc<AppState>>();
                 if let Some(w) = h.get_webview_window("main") {
-                    if w.is_visible().unwrap_or(false) {
-                        let _ = w.hide();
+                    if *state.auto_hide.read() {
+                        // Normal mode: left-click toggles visibility.
+                        if w.is_visible().unwrap_or(false) {
+                            let _ = w.hide();
+                        } else {
+                            position_bottom_right_once(&w);
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
                     } else {
-                        position_bottom_right_once(&w);
+                        // Keep-open mode: left-click only shows, never hides.
                         let _ = w.show();
                         let _ = w.set_focus();
                     }
