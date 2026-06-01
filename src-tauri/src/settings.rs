@@ -46,10 +46,9 @@ impl Settings {
                 return Ok(s);
             }
         }
-        let default_name = hostname::get()
-            .ok()
-            .and_then(|s| s.into_string().ok())
-            .unwrap_or_else(|| "My Computer".to_string());
+        // whoami::devicename() returns the friendly "Computer Name" (e.g.
+        // "Emmanuel's MacBook Pro") rather than the network hostname.
+        let default_name = whoami::devicename();
         let downloads = dirs::document_dir()
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("."));

@@ -10,7 +10,7 @@ mod transfer;
 use crate::{
     contacts::ContactBook, identity::Identity, settings::Settings, state::AppState,
 };
-use std::sync::Arc;
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow,
     menu::{Menu, MenuItem},
@@ -138,7 +138,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 if let Some(w) = app.get_webview_window("main") {
-                    position_bottom_right(&w);
+                    position_bottom_right_once(&w);
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
@@ -197,7 +197,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     if w.is_visible().unwrap_or(false) {
                         let _ = w.hide();
                     } else {
-                        position_bottom_right(&w);
+                        position_bottom_right_once(&w);
                         let _ = w.show();
                         let _ = w.set_focus();
                     }
@@ -206,6 +206,17 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+static WINDOW_POSITIONED: AtomicBool = AtomicBool::new(false);
+
+/// Position the window at the bottom-right corner, but only on the very first
+/// call. After that the user's dragged position is preserved.
+fn position_bottom_right_once(win: &WebviewWindow) {
+    if WINDOW_POSITIONED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    position_bottom_right(win);
 }
 
 fn position_bottom_right(win: &WebviewWindow) {
@@ -234,7 +245,7 @@ fn toggle_window(app: AppHandle) {
         if w.is_visible().unwrap_or(false) {
             let _ = w.hide();
         } else {
-            position_bottom_right(&w);
+            position_bottom_right_once(&w);
             let _ = w.show();
             let _ = w.set_focus();
         }
@@ -244,7 +255,7 @@ fn toggle_window(app: AppHandle) {
 #[tauri::command]
 fn show_window(app: AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
-        position_bottom_right(&w);
+        position_bottom_right_once(&w);
         let _ = w.show();
         let _ = w.set_focus();
     }
