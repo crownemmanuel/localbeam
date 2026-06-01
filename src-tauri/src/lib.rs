@@ -37,7 +37,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())
+                .expect("failed to initialize updater plugin");
+
             // Hide dock icon on macOS so only the tray icon represents the app.
             #[cfg(target_os = "macos")]
             {
@@ -151,8 +157,6 @@ pub fn run() {
             }
         });
 }
-
-
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_i = MenuItem::with_id(app, "open", "Open LocalBeam", true, None::<&str>)?;
     let keep_open_i = CheckMenuItem::with_id(app, "keep_open", "Keep Open", true, false, None::<&str>)?;

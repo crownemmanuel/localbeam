@@ -32,6 +32,7 @@ struct DiscoveryPeer {
     host: String,
     transfer_port: u16,
     http_port: u16,
+    mobile_web_available: bool,
 }
 
 /// Start the always-on UDP responder and the periodic background scanner.
@@ -179,6 +180,7 @@ async fn scan_once(state: &Arc<AppState>) {
                     host: peer.host,
                     transfer_port: peer.transfer_port,
                     http_port: peer.http_port,
+                    mobile_web_available: peer.mobile_web_available,
                     last_seen: now,
                 },
             );
@@ -214,6 +216,7 @@ fn build_peer_snapshot(state: &AppState, fallback_ip: String) -> DiscoveryPeer {
         host,
         transfer_port: s.transfer_port,
         http_port: s.http_port,
+        mobile_web_available: s.enable_qr_server,
     }
 }
 

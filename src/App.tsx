@@ -3,6 +3,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check } from "@tauri-apps/plugin-updater";
 import QRCode from "qrcode";
 import { api, withDialogFocus } from "./api";
 import type {
@@ -336,8 +338,15 @@ function fmtBytes(n: number) {
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
+function fmtTransferDate(ts: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(ts * 1000));
+}
+
 function TransfersPanel({ transfers, saveDir, onClear }: { transfers: TransferProgress[]; saveDir: string; onClear: () => void }) {
-  const sorted = [...transfers].sort((a, b) => b.transfer_id.localeCompare(a.transfer_id));
+  const sorted = [...transfers].sort((a, b) => b.created_at - a.created_at);
   return (
     <div className="transfer-list">
       <div className="row-between" style={{ marginBottom: 4 }}>
@@ -365,6 +374,7 @@ function TransfersPanel({ transfers, saveDir, onClear }: { transfers: TransferPr
           t.status === "failed" ? "Failed" :
           t.status === "rejected" ? "Declined" :
           t.status === "pending" ? "Waiting…" : t.status;
+        const dateLabel = t.direction === "incoming" ? "Received" : "Sent";
         return (
           <div key={t.transfer_id} className="transfer-card">
             <div className="transfer-head">
@@ -375,6 +385,9 @@ function TransfersPanel({ transfers, saveDir, onClear }: { transfers: TransferPr
                 <div className="transfer-peer">{t.peer_name}</div>
                 <div className="transfer-meta">
                   {t.files.length} file{t.files.length === 1 ? "" : "s"} · {fmtBytes(t.total_bytes)}
+                </div>
+                <div className="transfer-meta">
+                  {dateLabel} {fmtTransferDate(t.created_at)}
                 </div>
               </div>
               <span className={`transfer-status-chip ${chipCls}`}>{chipLabel}</span>
@@ -461,6 +474,8 @@ function SettingsPanel({ me, onChanged }: { me: MeInfo; onChanged: () => void })
   const [requireAccept, setRequireAccept] = useState(me.require_accept);
   const [enableQr, setEnableQr] = useState(me.enable_qr_server);
   const [dirty, setDirty] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState("");
 
   const save = async () => {
     await api.updateSettings({ device_name: name, save_dir: saveDir, allow_mode: allowMode, require_accept: requireAccept, enable_qr_server: enableQr });
@@ -472,6 +487,62 @@ function SettingsPanel({ me, onChanged }: { me: MeInfo; onChanged: () => void })
   const pickFolder = async () => {
     const sel = await withDialogFocus(() => openDialog({ directory: true }));
     if (typeof sel === "string") { setSaveDir(sel); setDirty(true); }
+  };
+
+  const checkForUpdates = async () => {
+    setUpdateBusy(true);
+    setUpdateStatus("Checking for updates…");
+    let update: Awaited<ReturnType<typeof check>> = null;
+    try {
+      update = await check();
+      if (!update) {
+        setUpdateStatus("You're up to date.");
+        return;
+      }
+
+      const details = [
+        `Version ${update.version} is available.`,
+        update.body?.trim() || "",
+        "Download and install it now?",
+      ].filter(Boolean).join("\n\n");
+
+      if (!window.confirm(details)) {
+        setUpdateStatus(`Update ${update.version} is available.`);
+        return;
+      }
+
+      let downloaded = 0;
+      let contentLength = 0;
+
+      await update.downloadAndInstall((event) => {
+        switch (event.event) {
+          case "Started":
+            contentLength = event.data.contentLength ?? 0;
+            setUpdateStatus("Downloading update…");
+            break;
+          case "Progress":
+            downloaded += event.data.chunkLength;
+            setUpdateStatus(
+              contentLength > 0
+                ? `Downloading update… ${Math.min(100, Math.round((downloaded / contentLength) * 100))}%`
+                : `Downloading update… ${fmtBytes(downloaded)}`
+            );
+            break;
+          case "Finished":
+            setUpdateStatus("Installing update…");
+            break;
+        }
+      });
+
+      setUpdateStatus("Update installed. Restarting…");
+      await relaunch();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setUpdateStatus(`Update failed: ${message}`);
+    } finally {
+      await update?.close().catch(() => {});
+      setUpdateBusy(false);
+    }
   };
 
   return (
@@ -523,6 +594,25 @@ function SettingsPanel({ me, onChanged }: { me: MeInfo; onChanged: () => void })
         <button className="muted full" onClick={() => openPath(me.save_dir).catch(console.error)}>
           <FolderOpenIcon size={14} /> Open folder
         </button>
+      </div>
+
+      <div className="field-group">
+        <div className="label" style={{ marginBottom: 10 }}>Updates</div>
+        <button
+          className="muted full"
+          disabled={updateBusy}
+          onClick={checkForUpdates}
+        >
+          <DownloadIcon size={14} /> {updateBusy ? "Updating…" : "Check for updates"}
+        </button>
+        <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 8, lineHeight: 1.45 }}>
+          Updates are pulled from the latest GitHub release.
+        </div>
+        {updateStatus && (
+          <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 8, lineHeight: 1.45 }}>
+            {updateStatus}
+          </div>
+        )}
       </div>
 
       <div style={{ display: "flex", gap: 8, marginTop: 4 }}>

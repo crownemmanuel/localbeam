@@ -19,6 +19,7 @@ export interface PeerInfo {
   host: string;
   transfer_port: number;
   http_port: number;
+  mobile_web_available: boolean;
   last_seen: number;
 }
 
@@ -61,6 +62,7 @@ export type TransferStatus =
 
 export interface TransferProgress {
   transfer_id: string;
+  created_at: number;
   direction: TransferDirection;
   peer_id: string | null;
   peer_name: string;

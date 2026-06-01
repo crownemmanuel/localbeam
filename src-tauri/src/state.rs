@@ -13,6 +13,7 @@ pub struct PeerInfo {
     pub host: String, // ipv4 string
     pub transfer_port: u16,
     pub http_port: u16,
+    pub mobile_web_available: bool,
     pub last_seen: u64,
 }
 
@@ -44,6 +45,7 @@ pub struct TransferFileMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferProgress {
     pub transfer_id: String,
+    pub created_at: u64,
     pub direction: TransferDirection,
     pub peer_id: Option<String>,
     pub peer_name: String,

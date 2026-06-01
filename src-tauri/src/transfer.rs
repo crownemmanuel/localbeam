@@ -1,26 +1,20 @@
 use crate::{
-    contacts::{ContactRequest, now_secs},
+    contacts::{now_secs, ContactRequest},
     settings::AllowMode,
     state::{
         AppState, IncomingPrompt, TransferDirection, TransferFileMeta, TransferProgress,
         TransferSource, TransferStatus,
     },
 };
-use anyhow::{Context, Result, anyhow};
-use tauri::Manager;
+use anyhow::{anyhow, Context, Result};
 use rustls::{
-    ClientConfig, RootCertStore, ServerConfig,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    ClientConfig, RootCertStore, ServerConfig,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    io::Cursor,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{io::Cursor, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use tauri::Manager;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -101,18 +95,26 @@ pub async fn send_files(
 
     let mut files_meta = Vec::with_capacity(paths.len());
     for p in &paths {
-        let md = tokio::fs::metadata(p).await.with_context(|| format!("stat {:?}", p))?;
+        let md = tokio::fs::metadata(p)
+            .await
+            .with_context(|| format!("stat {:?}", p))?;
         if !md.is_file() {
             return Err(anyhow!("{:?} is not a regular file", p));
         }
         files_meta.push(TransferFileMeta {
-            name: p.file_name().map(|n| n.to_string_lossy().into()).unwrap_or_else(|| "file".into()),
+            name: p
+                .file_name()
+                .map(|n| n.to_string_lossy().into())
+                .unwrap_or_else(|| "file".into()),
             size: md.len(),
-            mime: mime_guess::from_path(p).first().map(|m| m.essence_str().to_string()),
+            mime: mime_guess::from_path(p)
+                .first()
+                .map(|m| m.essence_str().to_string()),
         });
     }
     let total_bytes: u64 = files_meta.iter().map(|f| f.size).sum();
     let transfer_id = uuid::Uuid::new_v4().to_string();
+    let created_at = now_secs();
 
     let (sender_name, sender_avatar) = {
         let s = state.settings.read();
@@ -121,6 +123,7 @@ pub async fn send_files(
 
     state.update_transfer(TransferProgress {
         transfer_id: transfer_id.clone(),
+        created_at,
         direction: TransferDirection::Outgoing,
         peer_id: Some(peer.id.clone()),
         peer_name: peer.name.clone(),
@@ -192,7 +195,10 @@ async fn send_files_inner(
         .await
         .with_context(|| format!("connect {}:{}", host, port))?;
     let dns = ServerName::try_from("localbeam.local").unwrap().to_owned();
-    let mut tls = connector.connect(dns, stream).await.context("tls handshake")?;
+    let mut tls = connector
+        .connect(dns, stream)
+        .await
+        .context("tls handshake")?;
 
     let header = HeaderMsg::Send {
         from: PeerIdent {
@@ -208,7 +214,12 @@ async fn send_files_inner(
     let resp_raw = read_msg(&mut tls).await?;
     let resp: ResponseMsg = serde_json::from_slice(&resp_raw)?;
     if !resp.accepted {
-        let mut t = state.active_transfers.read().get(transfer_id).cloned().unwrap();
+        let mut t = state
+            .active_transfers
+            .read()
+            .get(transfer_id)
+            .cloned()
+            .unwrap();
         t.status = TransferStatus::Rejected;
         t.error = resp.reason.clone();
         state.update_transfer(t);
@@ -217,7 +228,12 @@ async fn send_files_inner(
 
     // Mark active
     {
-        let mut t = state.active_transfers.read().get(transfer_id).cloned().unwrap();
+        let mut t = state
+            .active_transfers
+            .read()
+            .get(transfer_id)
+            .cloned()
+            .unwrap();
         t.status = TransferStatus::Active;
         state.update_transfer(t);
     }
@@ -236,7 +252,12 @@ async fn send_files_inner(
 
             // Update progress (throttled to avoid event spam — every ~256 KiB)
             if bytes_sent % (256 * 1024) < CHUNK_SIZE as u64 || bytes_sent == total_bytes {
-                let mut t = state.active_transfers.read().get(transfer_id).cloned().unwrap();
+                let mut t = state
+                    .active_transfers
+                    .read()
+                    .get(transfer_id)
+                    .cloned()
+                    .unwrap();
                 t.current_file_index = idx;
                 t.bytes_sent = bytes_sent;
                 t.peer_name = peer.name.clone();
@@ -338,14 +359,25 @@ where
     // 1) Block / contact-only gating
     let (allow_mode, require_accept, save_dir) = {
         let s = state.settings.read();
-        (s.allow_mode.clone(), s.require_accept, PathBuf::from(&s.save_dir))
+        (
+            s.allow_mode.clone(),
+            s.require_accept,
+            PathBuf::from(&s.save_dir),
+        )
     };
     let (is_blocked, is_contact) = {
         let book = state.contacts.read();
         (book.is_blocked(&from.id), book.is_contact(&from.id))
     };
     if is_blocked {
-        let _ = write_msg(tls, &serde_json::to_vec(&ResponseMsg { accepted: false, reason: Some("blocked".into()) })?).await;
+        let _ = write_msg(
+            tls,
+            &serde_json::to_vec(&ResponseMsg {
+                accepted: false,
+                reason: Some("blocked".into()),
+            })?,
+        )
+        .await;
         return Ok(());
     }
     if matches!(allow_mode, AllowMode::Contacts) && !is_contact {
@@ -396,6 +428,7 @@ where
     // Insert pending transfer status
     state.update_transfer(TransferProgress {
         transfer_id: transfer_id.clone(),
+        created_at: now_secs(),
         direction: TransferDirection::Incoming,
         peer_id: Some(from.id.clone()),
         peer_name: from.name.clone(),
@@ -441,14 +474,22 @@ where
             })?,
         )
         .await?;
-        let mut t = state.active_transfers.read().get(&transfer_id).cloned().unwrap();
+        let mut t = state
+            .active_transfers
+            .read()
+            .get(&transfer_id)
+            .cloned()
+            .unwrap();
         t.status = TransferStatus::Rejected;
         state.update_transfer(t);
         return Ok(());
     }
     write_msg(
         tls,
-        &serde_json::to_vec(&ResponseMsg { accepted: true, reason: None })?,
+        &serde_json::to_vec(&ResponseMsg {
+            accepted: true,
+            reason: None,
+        })?,
     )
     .await?;
 
@@ -472,7 +513,12 @@ where
             remaining -= n as u64;
             bytes_recv += n as u64;
             if bytes_recv % (256 * 1024) < CHUNK_SIZE as u64 || bytes_recv == total_bytes {
-                let mut t = state.active_transfers.read().get(&transfer_id).cloned().unwrap();
+                let mut t = state
+                    .active_transfers
+                    .read()
+                    .get(&transfer_id)
+                    .cloned()
+                    .unwrap();
                 t.current_file_index = idx;
                 t.bytes_sent = bytes_recv;
                 t.status = TransferStatus::Active;
@@ -482,7 +528,12 @@ where
         out.flush().await?;
     }
 
-    let mut t = state.active_transfers.read().get(&transfer_id).cloned().unwrap();
+    let mut t = state
+        .active_transfers
+        .read()
+        .get(&transfer_id)
+        .cloned()
+        .unwrap();
     t.status = TransferStatus::Completed;
     t.bytes_sent = t.total_bytes;
     state.update_transfer(t);
@@ -495,10 +546,9 @@ fn server_tls_config(state: &Arc<AppState>) -> Result<ServerConfig> {
     let certs: Vec<CertificateDer<'static>> =
         rustls_pemfile::certs(&mut Cursor::new(state.identity.cert_pem.as_bytes()))
             .collect::<std::result::Result<_, _>>()?;
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut Cursor::new(
-        state.identity.key_pem.as_bytes(),
-    ))?
-    .ok_or_else(|| anyhow!("no private key"))?;
+    let key: PrivateKeyDer<'static> =
+        rustls_pemfile::private_key(&mut Cursor::new(state.identity.key_pem.as_bytes()))?
+            .ok_or_else(|| anyhow!("no private key"))?;
     let cfg = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;

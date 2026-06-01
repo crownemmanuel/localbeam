@@ -164,10 +164,7 @@ pub fn accept_contact_request(
 }
 
 #[tauri::command]
-pub fn reject_contact_request(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
+pub fn reject_contact_request(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     let mut book = state.contacts.write();
     book.reject_pending(&id);
     book.save(&state.data_dir).map_err(|e| e.to_string())?;
@@ -175,10 +172,7 @@ pub fn reject_contact_request(
 }
 
 #[tauri::command]
-pub fn remove_contact(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
+pub fn remove_contact(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     let mut book = state.contacts.write();
     book.remove_contact(&id);
     book.save(&state.data_dir).map_err(|e| e.to_string())?;
