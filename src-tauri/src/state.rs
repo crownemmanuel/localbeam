@@ -14,6 +14,8 @@ pub struct PeerInfo {
     pub transfer_port: u16,
     pub http_port: u16,
     pub mobile_web_available: bool,
+    #[serde(default)]
+    pub manual: bool,
     pub last_seen: u64,
 }
 
@@ -104,12 +106,34 @@ impl AppState {
         settings: Settings,
         contacts: ContactBook,
     ) -> Arc<Self> {
+        let now = crate::contacts::now_secs();
+        let peers = settings
+            .manual_peers
+            .iter()
+            .map(|peer| {
+                (
+                    peer.id.clone(),
+                    PeerInfo {
+                        id: peer.id.clone(),
+                        name: peer.name.clone(),
+                        avatar: "💻".into(),
+                        host: peer.host.clone(),
+                        transfer_port: peer.transfer_port,
+                        http_port: peer.http_port,
+                        mobile_web_available: true,
+                        manual: true,
+                        last_seen: now,
+                    },
+                )
+            })
+            .collect();
+
         Arc::new(Self {
             data_dir,
             identity,
             settings: RwLock::new(settings),
             contacts: RwLock::new(contacts),
-            peers: RwLock::new(HashMap::new()),
+            peers: RwLock::new(peers),
             pending_decisions: RwLock::new(HashMap::new()),
             active_transfers: RwLock::new(HashMap::new()),
             app: RwLock::new(None),

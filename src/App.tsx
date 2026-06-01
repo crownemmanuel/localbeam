@@ -122,6 +122,23 @@ export default function App() {
     try { await api.sendFiles(peerId, paths); } catch (e) { console.error("send", e); }
   }, []);
 
+  const addManualPeer = useCallback(async (
+    host: string,
+    name: string | null,
+    transferPort: number | null,
+    httpPort: number | null
+  ) => {
+    const peer = await api.addManualPeer(host, name, transferPort, httpPort);
+    await reloadAll();
+    return peer;
+  }, [reloadAll]);
+
+  const removeManualPeer = useCallback(async (peerId: string) => {
+    await api.removeManualPeer(peerId);
+    if (selectedPeer?.id === peerId) setSelectedPeer(null);
+    await reloadAll();
+  }, [reloadAll, selectedPeer?.id]);
+
   const onChooseFiles = useCallback(async () => {
     if (!selectedPeer) return;
     const result = await withDialogFocus(() => openDialog({ multiple: true }));
@@ -158,6 +175,8 @@ export default function App() {
             onRescan={() => api.republishDiscovery().then(reloadAll)}
             contacts={contacts}
             onRequestContact={(id) => api.sendContactRequest(id, null)}
+            onAddManualPeer={addManualPeer}
+            onRemoveManualPeer={removeManualPeer}
           />
         )}
         {tab === "transfers" && (
@@ -245,13 +264,91 @@ function DeviceIcon({ name }: { name: string }) {
   return <LaptopIcon size={22} />;
 }
 
-function DevicesPanel({ peers, me, selected, setSelected, onChooseFiles, dragOver, onRescan, contacts, onRequestContact }: {
+function parseManualPeerInput(input: string): { host: string; transferPort: number | null; httpPort: number | null } {
+  const value = input.trim();
+  if (!value) throw new Error("Enter an IP address.");
+
+  if (/^https?:\/\//i.test(value)) {
+    const url = new URL(value);
+    if (!url.hostname) throw new Error("Enter a valid IP address.");
+    return {
+      host: url.hostname.replace(/^\[|\]$/g, ""),
+      transferPort: null,
+      httpPort: url.port ? parsePort(url.port, "mobile web port") : null,
+    };
+  }
+
+  const ipv4WithPort = value.match(/^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/);
+  if (ipv4WithPort) {
+    return {
+      host: ipv4WithPort[1],
+      transferPort: parsePort(ipv4WithPort[2], "transfer port"),
+      httpPort: null,
+    };
+  }
+
+  const bracketed = value.match(/^\[([^\]]+)\]:(\d{1,5})$/);
+  if (bracketed) {
+    return {
+      host: bracketed[1],
+      transferPort: parsePort(bracketed[2], "transfer port"),
+      httpPort: null,
+    };
+  }
+
+  return { host: value.replace(/^\[|\]$/g, ""), transferPort: null, httpPort: null };
+}
+
+function parsePort(value: string, label: string) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Enter a valid ${label}.`);
+  }
+  return port;
+}
+
+function DevicesPanel({ peers, me, selected, setSelected, onChooseFiles, dragOver, onRescan, contacts, onRequestContact, onAddManualPeer, onRemoveManualPeer }: {
   peers: PeerInfo[]; me: MeInfo | null;
   selected: PeerInfo | null; setSelected: (p: PeerInfo | null) => void;
   onChooseFiles: () => void; dragOver: boolean;
   onRescan: () => void; contacts: Contact[];
   onRequestContact: (id: string) => void;
+  onAddManualPeer: (host: string, name: string | null, transferPort: number | null, httpPort: number | null) => Promise<PeerInfo>;
+  onRemoveManualPeer: (peerId: string) => Promise<void>;
 }) {
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualInput, setManualInput] = useState("");
+  const [manualName, setManualName] = useState("");
+  const [manualTransferPort, setManualTransferPort] = useState("");
+  const [manualHttpPort, setManualHttpPort] = useState("");
+  const [manualError, setManualError] = useState("");
+  const [manualSaving, setManualSaving] = useState(false);
+
+  const submitManualPeer = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setManualError("");
+    setManualSaving(true);
+    try {
+      const parsed = parseManualPeerInput(manualInput);
+      const peer = await onAddManualPeer(
+        parsed.host,
+        manualName.trim() || null,
+        manualTransferPort.trim() ? parsePort(manualTransferPort, "transfer port") : parsed.transferPort,
+        manualHttpPort.trim() ? parsePort(manualHttpPort, "mobile web port") : parsed.httpPort
+      );
+      setManualInput("");
+      setManualName("");
+      setManualTransferPort("");
+      setManualHttpPort("");
+      setManualOpen(false);
+      setSelected(peer);
+    } catch (error) {
+      setManualError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setManualSaving(false);
+    }
+  };
+
   if (selected) {
     const isContact = contacts.some((c) => c.id === selected.id);
     return (
@@ -266,7 +363,7 @@ function DevicesPanel({ peers, me, selected, setSelected, onChooseFiles, dragOve
           <div>
             <div style={{ fontWeight: 700 }}>{selected.name}</div>
             <div style={{ fontSize: 11, color: "var(--text2)" }}>
-              {selected.host}{isContact ? " · contact" : ""}
+              {selected.host}:{selected.transfer_port}{selected.manual ? " · manual" : isContact ? " · contact" : ""}
             </div>
           </div>
         </div>
@@ -281,6 +378,11 @@ function DevicesPanel({ peers, me, selected, setSelected, onChooseFiles, dragOve
         {me?.allow_mode === "contacts" && !isContact && (
           <button className="muted full" style={{ marginTop: 4 }} onClick={() => onRequestContact(selected.id)}>
             <UserPlusIcon size={14} /> Send contact request
+          </button>
+        )}
+        {selected.manual && (
+          <button className="muted full" style={{ marginTop: 8 }} onClick={() => onRemoveManualPeer(selected.id).then(() => setSelected(null))}>
+            <TrashIcon size={14} /> Remove manual IP
           </button>
         )}
       </div>
@@ -306,6 +408,62 @@ function DevicesPanel({ peers, me, selected, setSelected, onChooseFiles, dragOve
         </div>
       </div>
 
+      <div className="device-actions">
+        <button className="muted" onClick={onRescan}>
+          <RefreshIcon size={13} /> Rescan
+        </button>
+        <button className="muted" onClick={() => { setManualOpen((open) => !open); setManualError(""); }}>
+          {manualOpen ? <XIcon size={13} /> : <UserPlusIcon size={13} />}
+          {manualOpen ? "Cancel" : "Add manual IP"}
+        </button>
+      </div>
+
+      {manualOpen && (
+        <form className="manual-peer-form" onSubmit={submitManualPeer}>
+          <div className="field">
+            <label>IP address</label>
+            <input
+              value={manualInput}
+              onChange={(e) => setManualInput(e.target.value)}
+              placeholder="192.168.1.25 or 192.168.1.25:50000"
+            />
+          </div>
+          <div className="field">
+            <label>Display name</label>
+            <input
+              value={manualName}
+              onChange={(e) => setManualName(e.target.value)}
+              placeholder="Optional"
+            />
+          </div>
+          <div className="manual-port-row">
+            <div className="field">
+              <label>Transfer port</label>
+              <input
+                value={manualTransferPort}
+                onChange={(e) => setManualTransferPort(e.target.value.replace(/\D/g, ""))}
+                placeholder={me ? String(me.transfer_port) : "optional"}
+              />
+            </div>
+            <div className="field">
+              <label>Mobile port</label>
+              <input
+                value={manualHttpPort}
+                onChange={(e) => setManualHttpPort(e.target.value.replace(/\D/g, ""))}
+                placeholder={me ? String(me.http_port) : "optional"}
+              />
+            </div>
+          </div>
+          <div className="manual-help">
+            IP-only uses this app's saved LocalBeam ports. If the other computer shows different ports, enter them here.
+          </div>
+          {manualError && <div className="manual-error">{manualError}</div>}
+          <button disabled={manualSaving || !manualInput.trim()} style={{ width: "100%", justifyContent: "center" }}>
+            <CheckIcon size={14} /> {manualSaving ? "Saving…" : "Save manual IP"}
+          </button>
+        </form>
+      )}
+
       {/* Device grid */}
       <div className="device-grid">
         {peers.length === 0 ? (
@@ -319,8 +477,21 @@ function DevicesPanel({ peers, me, selected, setSelected, onChooseFiles, dragOve
         ) : (
           peers.map((p) => (
             <div key={p.id} className="device-card" onClick={() => setSelected(p)}>
+              {p.manual && (
+                <button
+                  className="device-card-remove"
+                  title="Remove manual IP"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemoveManualPeer(p.id).catch(console.error);
+                  }}
+                >
+                  <XIcon size={10} />
+                </button>
+              )}
               <div className="device-card-icon"><DeviceIcon name={p.name} /></div>
               <div className="device-card-name">{p.name}</div>
+              <div className="device-card-sub">{p.manual ? p.host : ""}</div>
             </div>
           ))
         )}
@@ -555,6 +726,16 @@ function SettingsPanel({ me, onChanged }: { me: MeInfo; onChanged: () => void })
         </div>
         <div className="label" style={{ marginBottom: 4 }}>Fingerprint</div>
         <div className="fingerprint">{me.id}</div>
+        <div className="port-summary">
+          <div>
+            <span>Transfer</span>
+            <strong>{me.transfer_port}</strong>
+          </div>
+          <div>
+            <span>Mobile</span>
+            <strong>{me.http_port}</strong>
+          </div>
+        </div>
       </div>
 
       <div className="field-group">

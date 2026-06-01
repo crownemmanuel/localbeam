@@ -16,6 +16,20 @@ export const api = {
   listTransfers: () => invoke<TransferProgress[]>("list_transfers"),
   updateSettings: (patch: Record<string, unknown>) =>
     invoke<unknown>("update_settings", { patch }),
+  addManualPeer: (
+    host: string,
+    name: string | null,
+    transferPort: number | null,
+    httpPort: number | null
+  ) =>
+    invoke<PeerInfo>("add_manual_peer", {
+      host,
+      name,
+      transferPort,
+      httpPort,
+    }),
+  removeManualPeer: (peerId: string) =>
+    invoke<void>("remove_manual_peer", { peerId }),
   sendFiles: (peerId: string, paths: string[]) =>
     invoke<string>("send_files", { peerId, paths }),
   sendContactRequest: (peerId: string, message: string | null) =>

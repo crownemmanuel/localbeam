@@ -22,6 +22,17 @@ pub struct Settings {
     /// Persistent ports (so QR url and discovery stay stable across restarts).
     pub transfer_port: u16,
     pub http_port: u16,
+    #[serde(default)]
+    pub manual_peers: Vec<ManualPeer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualPeer {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub transfer_port: u16,
+    pub http_port: u16,
 }
 
 impl Settings {
@@ -35,6 +46,7 @@ impl Settings {
             enable_qr_server: true,
             transfer_port: pick_port(0xB1),
             http_port: pick_port(0xB2),
+            manual_peers: Vec::new(),
         }
     }
 

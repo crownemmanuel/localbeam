@@ -20,6 +20,7 @@ export interface PeerInfo {
   transfer_port: number;
   http_port: number;
   mobile_web_available: boolean;
+  manual: boolean;
   last_seen: number;
 }
 

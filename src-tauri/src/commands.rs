@@ -1,11 +1,11 @@
 use crate::{
     contacts::Contact,
-    settings::Settings,
+    settings::{ManualPeer, Settings},
     state::{AppState, PeerInfo, TransferProgress},
     transfer,
 };
 use serde::Serialize;
-use std::{path::PathBuf, sync::Arc};
+use std::{net::IpAddr, path::PathBuf, sync::Arc};
 use tauri::State;
 
 #[derive(Serialize)]
@@ -50,7 +50,7 @@ pub fn get_me(state: State<'_, Arc<AppState>>) -> MeInfo {
 
 #[tauri::command]
 pub fn list_peers(state: State<'_, Arc<AppState>>) -> Vec<PeerInfo> {
-    state.peers.read().values().cloned().collect()
+    sorted_peers(&state)
 }
 
 #[tauri::command]
@@ -193,6 +193,87 @@ pub fn clear_completed_transfers(state: State<'_, Arc<AppState>>) {
     });
 }
 
+#[tauri::command]
+pub fn add_manual_peer(
+    state: State<'_, Arc<AppState>>,
+    host: String,
+    name: Option<String>,
+    transfer_port: Option<u16>,
+    http_port: Option<u16>,
+) -> Result<PeerInfo, String> {
+    let host = normalize_ip_host(&host)?;
+    let (transfer_port, http_port) = {
+        let settings = state.settings.read();
+        (
+            transfer_port.unwrap_or(settings.transfer_port),
+            http_port.unwrap_or(settings.http_port),
+        )
+    };
+
+    if transfer_port == 0 || http_port == 0 {
+        return Err("ports must be between 1 and 65535".into());
+    }
+
+    let id = manual_peer_id(&host, transfer_port);
+    let name = name
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("Manual {}", host));
+
+    let manual = ManualPeer {
+        id: id.clone(),
+        name: name.clone(),
+        host: host.clone(),
+        transfer_port,
+        http_port,
+    };
+
+    {
+        let mut settings = state.settings.write();
+        if let Some(existing) = settings.manual_peers.iter_mut().find(|peer| peer.id == id) {
+            *existing = manual;
+        } else {
+            settings.manual_peers.push(manual);
+        }
+        settings
+            .manual_peers
+            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        settings.save(&state.data_dir).map_err(|e| e.to_string())?;
+    }
+
+    let peer = PeerInfo {
+        id: id.clone(),
+        name,
+        avatar: "💻".into(),
+        host,
+        transfer_port,
+        http_port,
+        mobile_web_available: true,
+        manual: true,
+        last_seen: crate::contacts::now_secs(),
+    };
+
+    state.peers.write().insert(id, peer.clone());
+    emit_peers(&state);
+    Ok(peer)
+}
+
+#[tauri::command]
+pub fn remove_manual_peer(state: State<'_, Arc<AppState>>, peer_id: String) -> Result<(), String> {
+    {
+        let mut settings = state.settings.write();
+        let before = settings.manual_peers.len();
+        settings.manual_peers.retain(|peer| peer.id != peer_id);
+        if settings.manual_peers.len() != before {
+            settings.save(&state.data_dir).map_err(|e| e.to_string())?;
+        }
+    }
+
+    state.peers.write().remove(&peer_id);
+    emit_peers(&state);
+    Ok(())
+}
+
 fn local_ip() -> Option<String> {
     use std::net::IpAddr;
     if let Ok(list) = local_ip_address::list_afinet_netifas() {
@@ -208,4 +289,33 @@ fn local_ip() -> Option<String> {
         }
     }
     local_ip_address::local_ip().ok().map(|ip| ip.to_string())
+}
+
+fn normalize_ip_host(raw: &str) -> Result<String, String> {
+    let host = raw.trim().trim_matches(|c| c == '[' || c == ']');
+    if host.is_empty() {
+        return Err("enter an IP address".into());
+    }
+    host.parse::<IpAddr>()
+        .map(|ip| ip.to_string())
+        .map_err(|_| "enter a valid IP address".into())
+}
+
+fn manual_peer_id(host: &str, transfer_port: u16) -> String {
+    format!("manual:{}:{}", host, transfer_port)
+}
+
+fn sorted_peers(state: &Arc<AppState>) -> Vec<PeerInfo> {
+    let mut peers: Vec<PeerInfo> = state.peers.read().values().cloned().collect();
+    peers.sort_by(|a, b| {
+        a.manual
+            .cmp(&b.manual)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.host.cmp(&b.host))
+    });
+    peers
+}
+
+fn emit_peers(state: &Arc<AppState>) {
+    state.emit("peers", sorted_peers(state));
 }

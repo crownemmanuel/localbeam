@@ -7,14 +7,15 @@ mod settings;
 mod state;
 mod transfer;
 
-use crate::{
-    contacts::ContactBook, identity::Identity, settings::Settings, state::AppState,
+use crate::{contacts::ContactBook, identity::Identity, settings::Settings, state::AppState};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, Wry,
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, Wry,
 };
 
 struct KeepOpenItem(CheckMenuItem<Wry>);
@@ -57,12 +58,10 @@ pub fn run() {
                 .unwrap_or_else(|_| std::env::temp_dir().join("localbeam"));
             std::fs::create_dir_all(&data_dir).ok();
 
-            let identity = Identity::load_or_create(&data_dir)
-                .expect("failed to create/load identity");
-            let settings = Settings::load_or_create(&data_dir)
-                .expect("failed to load settings");
-            let contacts = ContactBook::load_or_create(&data_dir)
-                .expect("failed to load contacts");
+            let identity =
+                Identity::load_or_create(&data_dir).expect("failed to create/load identity");
+            let settings = Settings::load_or_create(&data_dir).expect("failed to load settings");
+            let contacts = ContactBook::load_or_create(&data_dir).expect("failed to load contacts");
             let state = AppState::new(data_dir, identity, settings, contacts);
             state.set_app_handle(app_handle.clone());
             app.manage(state.clone());
@@ -124,6 +123,8 @@ pub fn run() {
             commands::list_pending_contact_requests,
             commands::list_transfers,
             commands::update_settings,
+            commands::add_manual_peer,
+            commands::remove_manual_peer,
             commands::send_files,
             commands::send_contact_request,
             commands::decide_incoming,
@@ -159,7 +160,8 @@ pub fn run() {
 }
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_i = MenuItem::with_id(app, "open", "Open LocalBeam", true, None::<&str>)?;
-    let keep_open_i = CheckMenuItem::with_id(app, "keep_open", "Keep Open", true, false, None::<&str>)?;
+    let keep_open_i =
+        CheckMenuItem::with_id(app, "keep_open", "Keep Open", true, false, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open_i, &keep_open_i, &quit_i])?;
 
@@ -257,9 +259,10 @@ fn position_bottom_right(win: &WebviewWindow) {
     let m_pos: PhysicalPosition<i32> = *monitor.position();
     let scale = monitor.scale_factor();
 
-    let win_size = win
-        .outer_size()
-        .unwrap_or(PhysicalSize::new((380.0 * scale) as u32, (560.0 * scale) as u32));
+    let win_size = win.outer_size().unwrap_or(PhysicalSize::new(
+        (380.0 * scale) as u32,
+        (560.0 * scale) as u32,
+    ));
 
     // 12px logical margin
     let margin_px = (12.0 * scale) as i32;
